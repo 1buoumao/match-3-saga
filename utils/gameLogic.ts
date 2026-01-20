@@ -35,15 +35,14 @@ export const initializeGrid = (level: LevelConfig): (Tile | null)[][] => {
   return grid;
 };
 
-export interface MatchResult {
-  r: number;
-  c: number;
-  count: number;
-  isHorizontal: boolean;
+export interface MatchGroup {
+  colorIndex: number;
+  coords: { r: number, c: number }[];
+  type: 'horizontal' | 'vertical';
 }
 
-export const findMatches = (grid: (Tile | null)[][]) => {
-  const matches = new Set<string>();
+export const findMatches = (grid: (Tile | null)[][]): MatchGroup[] => {
+  const groups: MatchGroup[] = [];
   const rows = grid.length;
   const cols = grid[0].length;
 
@@ -52,12 +51,14 @@ export const findMatches = (grid: (Tile | null)[][]) => {
     let count = 1;
     for (let c = 0; c < cols; c++) {
       const current = grid[r][c];
-      const next = grid[r][c+1];
+      const next = c < cols - 1 ? grid[r][c + 1] : null;
       if (next && current && current.type === 'gem' && current.colorIndex === next.colorIndex) {
         count++;
       } else {
         if (count >= 3) {
-          for (let i = 0; i < count; i++) matches.add(`${r},${c - i}`);
+          const coords = [];
+          for (let i = 0; i < count; i++) coords.push({ r, c: c - i });
+          groups.push({ colorIndex: grid[r][c]?.colorIndex ?? 0, coords, type: 'horizontal' });
         }
         count = 1;
       }
@@ -69,22 +70,21 @@ export const findMatches = (grid: (Tile | null)[][]) => {
     let count = 1;
     for (let r = 0; r < rows; r++) {
       const current = grid[r][c];
-      const next = r < rows - 1 ? grid[r+1][c] : null;
+      const next = r < rows - 1 ? grid[r + 1][c] : null;
       if (next && current && current.type === 'gem' && current.colorIndex === next.colorIndex) {
         count++;
       } else {
         if (count >= 3) {
-          for (let i = 0; i < count; i++) matches.add(`${r - i},${c}`);
+          const coords = [];
+          for (let i = 0; i < count; i++) coords.push({ r: r - i, c });
+          groups.push({ colorIndex: grid[r][c]?.colorIndex ?? 0, coords, type: 'vertical' });
         }
         count = 1;
       }
     }
   }
 
-  return Array.from(matches).map(s => {
-    const [r, c] = s.split(',').map(Number);
-    return { r, c };
-  });
+  return groups;
 };
 
 export const checkAdjacent = (r1: number, c1: number, r2: number, c2: number) => {
@@ -107,8 +107,6 @@ export const handleExplosion = (grid: (Tile | null)[][], r: number, c: number, s
       }
     }
   } else if (specialType === 'rainbow') {
-    // Simple rainbow logic: Clear random color or specific pattern
-    // Usually rainbow reacts to the swapped color, but here we just clear some random area
     for (let i = 0; i < rows; i++) affected.push({ r: i, c });
   }
   return affected;

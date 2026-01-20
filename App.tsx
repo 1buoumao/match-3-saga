@@ -51,29 +51,45 @@ const App: React.FC = () => {
     if (gameState.isProcessing || gameState.movesLeft <= 0) return;
 
     const currentGrid = [...gameState.grid.map(row => [...row])];
-    const gemTiles: { r: number, c: number, colorIndex: number }[] = [];
+    const gemPositions: { r: number, c: number }[] = [];
+    const colorPool: number[] = [];
 
+    // Reset special tiles and collect movable gems
     for (let r = 0; r < GRID_ROWS; r++) {
       for (let c = 0; c < GRID_COLS; c++) {
         const tile = currentGrid[r][c];
         if (tile && tile.type === 'gem' && !tile.isChained && tile.obstacle !== 'ice') {
-          gemTiles.push({ r, c, colorIndex: tile.colorIndex });
+          // Rule: Special blocks should be cleared (reset to normal)
+          if (tile.special !== 'none') {
+            tile.special = 'none';
+          }
+          gemPositions.push({ r, c });
+          colorPool.push(tile.colorIndex);
         }
       }
     }
 
-    if (gemTiles.length === 0) return;
+    if (gemPositions.length === 0) return;
 
-    const colors = gemTiles.map(t => t.colorIndex);
-    for (let i = colors.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [colors[i], colors[j]] = [colors[j], colors[i]];
+    let attempts = 0;
+    let foundValidShuffle = false;
+    const maxAttempts = 100;
+
+    while (!foundValidShuffle && attempts < maxAttempts) {
+      attempts++;
+      for (let i = colorPool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [colorPool[i], colorPool[j]] = [colorPool[j], colorPool[i]];
+      }
+      gemPositions.forEach((pos, idx) => {
+        const tile = currentGrid[pos.r][pos.c]!;
+        currentGrid[pos.r][pos.c] = { ...tile, colorIndex: colorPool[idx] };
+      });
+      const matchGroups = findMatches(currentGrid);
+      if (matchGroups.length === 0) {
+        foundValidShuffle = true;
+      }
     }
-
-    gemTiles.forEach((pos, idx) => {
-      const tile = currentGrid[pos.r][pos.c]!;
-      currentGrid[pos.r][pos.c] = { ...tile, colorIndex: colors[idx] };
-    });
 
     setGameState(prev => ({
       ...prev,
@@ -83,7 +99,7 @@ const App: React.FC = () => {
     }));
 
     setTimeout(() => {
-      processGrid(currentGrid);
+      setGameState(prev => ({ ...prev, isProcessing: false }));
     }, 400);
   };
 
@@ -109,40 +125,43 @@ const App: React.FC = () => {
     setGameState(prev => ({ ...prev, isProcessing: true }));
 
     while (matchesFound) {
-      const matches = findMatches(currentGrid);
-      if (matches.length === 0) {
+      const matchGroups = findMatches(currentGrid);
+      if (matchGroups.length === 0) {
         matchesFound = false;
         break;
       }
 
       localCombo++;
       const toRemove = new Set<string>();
+      const specialsToSpawn: { r: number, c: number, colorIndex: number, type: SpecialType }[] = [];
 
-      // Group matches to detect 4/5 matches for special effects
-      const matchGroups: { r: number, c: number }[][] = [];
-      // Basic match detection returns individual tiles, we should ideally group them 
-      // but for VFX purposes we can just trigger a larger "pop" if match size is large
-      const matchTileCount = matches.length;
-
-      matches.forEach(m => {
-        const tile = currentGrid[m.r][m.c];
-        if (tile) {
-          toRemove.add(`${m.r},${m.c}`);
-          
-          // Trigger Laser/Explosion VFX for special tiles
-          if (tile.special === 'h-stripe') addVFX('laser-h', m.r, m.c);
-          if (tile.special === 'v-stripe') addVFX('laser-v', m.r, m.c);
-          if (tile.special === 'bomb') addVFX('bomb-burst', m.r, m.c);
-          
-          if (tile.special !== 'none') {
-            const exploded = handleExplosion(currentGrid, m.r, m.c, tile.special);
-            exploded.forEach(e => toRemove.add(`${e.r},${e.c}`));
+      matchGroups.forEach(group => {
+        group.coords.forEach(m => {
+          const tile = currentGrid[m.r][m.c];
+          if (tile) {
+            toRemove.add(`${m.r},${m.c}`);
+            if (tile.special === 'h-stripe') addVFX('laser-h', m.r, m.c);
+            if (tile.special === 'v-stripe') addVFX('laser-v', m.r, m.c);
+            if (tile.special === 'bomb') addVFX('bomb-burst', m.r, m.c);
+            
+            if (tile.special !== 'none') {
+              const exploded = handleExplosion(currentGrid, m.r, m.c, tile.special);
+              exploded.forEach(e => toRemove.add(`${e.r},${e.c}`));
+            }
+            addVFX('match-pop', m.r, m.c);
           }
+        });
+
+        if (group.coords.length >= 4) {
+          const spawnAt = group.coords[0];
+          specialsToSpawn.push({
+            r: spawnAt.r,
+            c: spawnAt.c,
+            colorIndex: group.colorIndex,
+            type: group.coords.length >= 5 ? 'bomb' : (group.type === 'horizontal' ? 'v-stripe' : 'h-stripe')
+          });
         }
       });
-
-      // Generic pop VFX for all cleared tiles
-      matches.forEach(m => addVFX('match-pop', m.r, m.c));
 
       const pointsPerTile = 10 * localCombo;
       const batchScore = toRemove.size * pointsPerTile;
@@ -184,12 +203,9 @@ const App: React.FC = () => {
         currentGrid[r][c] = null;
       });
 
-      // Create Specials for 4+ matches
-      if (matches.length >= 4) {
-        const firstMatch = matches[0];
-        const spec: SpecialType = matches.length >= 5 ? 'bomb' : 'h-stripe';
-        currentGrid[firstMatch.r][firstMatch.c] = createTile(Math.floor(Math.random() * 7), 'none', spec);
-      }
+      specialsToSpawn.forEach(spec => {
+        currentGrid[spec.r][spec.c] = createTile(spec.colorIndex, 'none', spec.type);
+      });
 
       setGameState(prev => ({
         ...prev,
@@ -198,9 +214,8 @@ const App: React.FC = () => {
         currentLevel: { ...prev.currentLevel, goals: currentGoals }
       }));
 
-      await new Promise(res => setTimeout(res, 350));
+      await new Promise(res => setTimeout(res, 250));
 
-      // Cascade / Falling animation logic
       for (let c = 0; c < GRID_COLS; c++) {
         let writeIdx = GRID_ROWS - 1;
         for (let r = GRID_ROWS - 1; r >= 0; r--) {
@@ -213,7 +228,6 @@ const App: React.FC = () => {
             writeIdx = r - 1;
           }
         }
-        // Refill from top
         for (let r = writeIdx; r >= 0; r--) {
           if (!currentGrid[r][c]) {
             currentGrid[r][c] = createTile(Math.floor(Math.random() * 7));
@@ -222,7 +236,7 @@ const App: React.FC = () => {
       }
 
       setGameState(prev => ({ ...prev, grid: [...currentGrid] }));
-      await new Promise(res => setTimeout(res, 250));
+      await new Promise(res => setTimeout(res, 350));
     }
 
     setGameState(prev => {
@@ -288,8 +302,8 @@ const App: React.FC = () => {
 
     await new Promise(res => setTimeout(res, 200));
 
-    const matches = findMatches(nextGrid);
-    if (matches.length > 0) {
+    const matchGroups = findMatches(nextGrid);
+    if (matchGroups.length > 0) {
       processGrid(nextGrid);
     } else {
       let rollbackGrid = [...gameState.grid.map(row => [...row])];
@@ -307,7 +321,6 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#1a1a2e] flex flex-col items-center justify-center p-4 overflow-hidden relative">
 
-      {/* Start Screen Overlay */}
       <AnimatePresence>
         {gameStatus === 'start' && (
           <motion.div
@@ -351,7 +364,6 @@ const App: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Level Selection Modal */}
       <AnimatePresence>
         {gameStatus === 'level-select' && (
           <motion.div
@@ -386,7 +398,6 @@ const App: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Game Header */}
       <div className="w-full max-w-md mb-4 flex flex-col gap-2">
         <div className="flex justify-between items-center w-full px-1">
           <button
@@ -426,58 +437,73 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Game Board */}
       <div
         className="relative bg-[#0f3460] p-2 rounded-2xl shadow-inner border-4 border-[#16213e] touch-none"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
       >
         <div className="grid grid-cols-6 gap-1.5 relative overflow-hidden">
-          {gameState.grid.map((row, r) =>
-            row.map((tile, c) => (
-              <motion.div
-                key={tile?.id || `empty-${r}-${c}`}
-                layout
-                initial={{ y: -50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ scale: 0.5, opacity: 0 }}
-                transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                onPointerDown={(e) => handlePointerDown(e, r, c)}
-                className={`w-12 h-12 md:w-16 md:h-16 flex items-center justify-center rounded-xl cursor-pointer select-none relative
-                  ${gameState.selectedTile?.r === r && gameState.selectedTile?.c === c ? 'scale-110 z-10' : ''}
-                  ${tile?.type === 'stone' ? 'bg-slate-800' : 'active:scale-95'}
-                `}
-              >
-                {tile && (
-                  <div className={`w-full h-full rounded-xl flex items-center justify-center relative ${GEM_COLORS[tile.colorIndex]} shadow-[inset_0_2px_4px_rgba(255,255,255,0.3),0_4px_6px_rgba(0,0,0,0.3)] transition-all`}>
-                    <span className="text-2xl md:text-4xl filter drop-shadow-md">
-                      {tile.type === 'stone' ? '🧱' : GEM_ICONS[tile.colorIndex]}
-                    </span>
+          <AnimatePresence mode="popLayout">
+            {gameState.grid.map((row, r) =>
+              row.map((tile, c) => (
+                <motion.div
+                  key={tile?.id || `empty-${r}-${c}`}
+                  layout="position"
+                  initial={{ y: -200, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ scale: 0, opacity: 0 }}
+                  transition={{ 
+                    type: 'spring', 
+                    stiffness: 400, 
+                    damping: 30,
+                    layout: { duration: 0.35, ease: "easeOut" }
+                  }}
+                  onPointerDown={(e) => handlePointerDown(e, r, c)}
+                  className={`w-12 h-12 md:w-16 md:h-16 flex items-center justify-center rounded-xl cursor-pointer select-none relative
+                    ${gameState.selectedTile?.r === r && gameState.selectedTile?.c === c ? 'scale-110 z-10' : ''}
+                    ${tile?.type === 'stone' ? 'bg-slate-800' : 'active:scale-95'}
+                  `}
+                >
+                  {tile && (
+                    <div className={`w-full h-full rounded-xl flex items-center justify-center relative ${GEM_COLORS[tile.colorIndex]} shadow-[inset_0_2px_4px_rgba(255,255,255,0.3),0_4px_6px_rgba(0,0,0,0.3)] transition-all`}>
+                      <span className={`text-2xl md:text-4xl filter drop-shadow-md ${tile.special !== 'none' ? 'scale-110' : ''}`}>
+                        {tile.type === 'stone' ? '🧱' : (tile.special === 'bomb' ? '💣' : GEM_ICONS[tile.colorIndex])}
+                      </span>
 
-                    {/* Specials Highlights */}
-                    {tile.special === 'h-stripe' && (
-                      <div className="absolute inset-x-0 h-3 bg-white/50 top-1/2 -translate-y-1/2 rounded-full blur-[1px] animate-pulse"></div>
-                    )}
-                    {tile.special === 'v-stripe' && (
-                      <div className="absolute inset-y-0 w-3 bg-white/50 left-1/2 -translate-x-1/2 rounded-full blur-[1px] animate-pulse"></div>
-                    )}
-                    {tile.special === 'bomb' && (
-                      <div className="absolute inset-0 rounded-xl ring-4 ring-white/60 animate-pulse bg-white/10"></div>
-                    )}
+                      {tile.special === 'h-stripe' && (
+                        <div className="absolute inset-x-0 h-full flex flex-col justify-evenly py-1 pointer-events-none">
+                          <div className="h-1 bg-white/60 blur-[0.5px]"></div>
+                          <div className="h-1 bg-white/60 blur-[0.5px]"></div>
+                          <div className="h-1 bg-white/60 blur-[0.5px]"></div>
+                        </div>
+                      )}
+                      {tile.special === 'v-stripe' && (
+                        <div className="absolute inset-y-0 w-full flex justify-evenly px-1 pointer-events-none">
+                          <div className="w-1 bg-white/60 blur-[0.5px]"></div>
+                          <div className="w-1 bg-white/60 blur-[0.5px]"></div>
+                          <div className="w-1 bg-white/60 blur-[0.5px]"></div>
+                        </div>
+                      )}
+                      
+                      {tile.special === 'bomb' && (
+                        <div className="absolute inset-0 rounded-xl ring-4 ring-white/60 animate-pulse bg-white/10 flex items-center justify-center">
+                          <div className="absolute -top-1 -right-1 w-4 h-4 bg-orange-500 rounded-full border border-white shadow-[0_0_8px_orange] animate-ping"></div>
+                        </div>
+                      )}
 
-                    {tile.obstacle === 'ice' && (
-                      <div className={`absolute inset-0 bg-white/70 rounded-xl flex items-center justify-center border-4 border-blue-200/50 ${tile.iceLayers === 2 ? 'opacity-100' : 'opacity-40'}`}>
-                        <span className="text-xl">❄️</span>
-                      </div>
-                    )}
-                    {tile.isChained && <div className="absolute inset-0 flex items-center justify-center text-3xl">⛓️</div>}
-                  </div>
-                )}
-              </motion.div>
-            ))
-          )}
+                      {tile.obstacle === 'ice' && (
+                        <div className={`absolute inset-0 bg-white/70 rounded-xl flex items-center justify-center border-4 border-blue-200/50 ${tile.iceLayers === 2 ? 'opacity-100' : 'opacity-40'}`}>
+                          <span className="text-xl">❄️</span>
+                        </div>
+                      )}
+                      {tile.isChained && <div className="absolute inset-0 flex items-center justify-center text-3xl">⛓️</div>}
+                    </div>
+                  )}
+                </motion.div>
+              ))
+            )}
+          </AnimatePresence>
 
-          {/* VFX Overlay Layer */}
           <AnimatePresence>
             {vfx.map((effect) => (
               <motion.div
@@ -529,7 +555,6 @@ const App: React.FC = () => {
           </AnimatePresence>
         </div>
 
-        {/* Victory/Defeat Screen */}
         <AnimatePresence>
           {(gameStatus === 'won' || gameStatus === 'lost') && (
             <motion.div
@@ -564,7 +589,6 @@ const App: React.FC = () => {
         </AnimatePresence>
       </div>
 
-      {/* Target Objectives Display */}
       {gameStatus === 'playing' && (
         <div className="mt-6 w-full max-w-md bg-[#16213e] p-4 rounded-2xl border-t-4 border-[#0f3460] shadow-xl">
           <div className="flex flex-wrap justify-center gap-4">
